@@ -1,4 +1,5 @@
 import os
+import time
 import uuid
 import urllib.parse
 import hashlib
@@ -9,7 +10,6 @@ from flask import Flask, request, send_from_directory, Response
 from selenium import webdriver
 from selenium.webdriver.firefox.service import Service
 from selenium.webdriver.firefox.options import Options
-from selenium.webdriver.common.action_chains import ActionChains
 
 # =========================
 # LOGGING
@@ -88,46 +88,103 @@ class BrowserManager:
         log.info("[BROWSER] Ready")
 
     # -------------------------
+    # PAGE READINESS WAIT
+    # -------------------------
+    def wait_for_page_ready(self, action_label: str = "action",
+                            settle_s: float = 0.1,
+                            poll_s: float = 0.1,
+                            stability_s: float = 0.3,
+                            timeout_s: float = 30.0):
+        """
+        Block until the browser has finished loading after any action.
+
+        Waits for ALL of:
+          • document.readyState == 'complete'
+          • URL and page title have been stable for `stability_s` seconds
+            (catches SPA soft-navigations that never flip readyState)
+
+        `settle_s` is a brief initial pause so the browser has time to
+        start a navigation that may not begin synchronously with the action.
+        """
+        log.info(f"[WAIT] Settling after {action_label} ({settle_s}s)…")
+        time.sleep(settle_s)
+
+        deadline     = time.monotonic() + timeout_s
+        stable_since = time.monotonic()
+        last_url     = self.driver.current_url
+        last_title   = self.driver.title
+
+        log.info(f"[WAIT] Polling for page ready (timeout={timeout_s}s)…")
+        while time.monotonic() < deadline:
+            ready_state = self.driver.execute_script("return document.readyState;")
+            cur_url     = self.driver.current_url
+            cur_title   = self.driver.title
+
+            if cur_url != last_url or cur_title != last_title:
+                last_url     = cur_url
+                last_title   = cur_title
+                stable_since = time.monotonic()
+                log.info(f"[WAIT] Change detected → {cur_url!r}  readyState={ready_state}")
+
+            if (ready_state == "complete"
+                    and time.monotonic() - stable_since >= stability_s):
+                log.info(f"[WAIT] Page ready after {action_label}")
+                return
+
+            time.sleep(poll_s)
+
+        log.warning(f"[WAIT] Timed out after {timeout_s}s waiting for {action_label}")
+
+    # -------------------------
     # NAVIGATION
     # -------------------------
     def navigate(self, url: str):
         log.info(f"[NAV] {url}")
         self.driver.get(url)
+        self.wait_for_page_ready("navigate")
 
     # -------------------------
     # CLICK at centred coords
     # -------------------------
     def click_at(self, img_x: float, img_y: float):
-        """
-        img_x, img_y are in the centred coordinate system:
-            x=0,y=0  → centre of viewport
-            x=-vw/2  → left edge,   x=+vw/2 → right edge
-            y=+vh/2  → top edge,    y=-vh/2  → bottom edge
-
-        Selenium's move_to_element_with_offset expects pixel offsets
-        from the centre of the element (body), so we convert directly.
-        Selenium y-axis: positive = down, so we negate img_y.
-        """
         vw = self.driver.execute_script("return window.innerWidth;")
         vh = self.driver.execute_script("return window.innerHeight;")
         log.info(f"[CLICK] Viewport: {vw}×{vh}  img_coords: ({img_x}, {img_y})")
 
-        # Clamp to viewport bounds (client already clips, but be safe)
         img_x = max(-vw / 2, min(vw / 2, img_x))
         img_y = max(-vh / 2, min(vh / 2, img_y))
 
-        # Convert to Selenium pixel coords (origin = top-left of viewport)
         px = int(vw / 2 + img_x)
         py = int(vh / 2 - img_y)          # flip y
         log.info(f"[CLICK] Pixel coords: ({px}, {py})")
 
-        # Use JavaScript click so we stay at the exact viewport pixel
-        # regardless of scroll position or element offsets.
         self.driver.execute_script(
             "document.elementFromPoint(arguments[0], arguments[1])?.click();",
             px, py
         )
-        log.info("[CLICK] Done")
+        self.wait_for_page_ready("click")
+
+    # -------------------------
+    # SCROLL
+    # -------------------------
+    def scroll(self, direction: str):
+        log.info(f"[SCROLL] {direction}")
+        delta = "window.innerHeight" if direction == "down" else "-window.innerHeight"
+        self.driver.execute_script(f"window.scrollBy(0, {delta});")
+        self.wait_for_page_ready("scroll")
+
+    # -------------------------
+    # BACK / FORWARD
+    # -------------------------
+    def back(self):
+        log.info("[NAV] back")
+        self.driver.back()
+        self.wait_for_page_ready("back")
+
+    def forward(self):
+        log.info("[NAV] forward")
+        self.driver.forward()
+        self.wait_for_page_ready("forward")
 
     # -------------------------
     # SCROLL POSITION
@@ -200,17 +257,6 @@ class BrowserManager:
     # -------------------------
     def current_url(self):
         return self.driver.current_url
-
-    # -------------------------
-    # NAV
-    # -------------------------
-    def back(self):
-        log.info("[NAV] back")
-        self.driver.back()
-
-    def forward(self):
-        log.info("[NAV] forward")
-        self.driver.forward()
 
     def close(self):
         log.info("[BROWSER] shutdown")
@@ -297,15 +343,13 @@ def screenshot():
 @app.route("/scroll/down", methods=["GET"])
 @require_api_ip
 def scroll_down():
-    log.info("[SCROLL] down")
-    browser.driver.execute_script("window.scrollBy(0, window.innerHeight);")
+    browser.scroll("down")
     return Response("OK")
 
 @app.route("/scroll/up", methods=["GET"])
 @require_api_ip
 def scroll_up():
-    log.info("[SCROLL] up")
-    browser.driver.execute_script("window.scrollBy(0, -window.innerHeight);")
+    browser.scroll("up")
     return Response("OK")
 
 
