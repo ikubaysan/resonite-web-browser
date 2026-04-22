@@ -90,48 +90,133 @@ class BrowserManager:
     # -------------------------
     # PAGE READINESS WAIT
     # -------------------------
+
+    # Injected once per page — installs a PerformanceObserver that tracks
+    # how many resource fetches are in-flight at any moment.
+    _INJECT_NETWORK_TRACKER = """
+    if (!window.__netTracker) {
+        window.__netTracker = {
+            inFlight: 0,
+            lastFinished: performance.now()
+        };
+        const t = window.__netTracker;
+        // Intercept fetch
+        const origFetch = window.fetch;
+        window.fetch = function(...args) {
+            t.inFlight++;
+            return origFetch.apply(this, args).finally(() => {
+                t.inFlight = Math.max(0, t.inFlight - 1);
+                t.lastFinished = performance.now();
+            });
+        };
+        // Intercept XMLHttpRequest
+        const origOpen = XMLHttpRequest.prototype.open;
+        XMLHttpRequest.prototype.open = function(...args) {
+            this.addEventListener('loadend', () => {
+                t.inFlight = Math.max(0, t.inFlight - 1);
+                t.lastFinished = performance.now();
+            });
+            t.inFlight++;
+            return origOpen.apply(this, args);
+        };
+    }
+    """
+
+    _QUERY_NETWORK = """
+    return (function() {
+        const t = window.__netTracker;
+        // Only count images that are inside the current viewport.
+        // Lazy-loaded off-screen images are never .complete until scrolled
+        // into view, so waiting for them would always time out.
+        const vw = window.innerWidth, vh = window.innerHeight;
+        const pendingImgs = Array.from(document.images).filter(i => {
+            if (!i.src || i.complete) return false;
+            const r = i.getBoundingClientRect();
+            return r.bottom > 0 && r.right > 0 && r.top < vh && r.left < vw;
+        }).length;
+        const inFlight    = t ? t.inFlight : 0;
+        const msSinceLast = t ? (performance.now() - t.lastFinished) : 9999;
+        return {pendingImgs, inFlight, msSinceLast};
+    })();
+    """
+
     def wait_for_page_ready(self, action_label: str = "action",
-                            settle_s: float = 0.1,
+                            settle_s: float = 0.15,
                             poll_s: float = 0.1,
-                            stability_s: float = 0.3,
+                            stability_s: float = 0.4,
+                            network_quiet_ms: float = 500,
                             timeout_s: float = 30.0):
         """
-        Block until the browser has finished loading after any action.
+        Block until the browser has truly finished loading after any action.
 
         Waits for ALL of:
-          • document.readyState == 'complete'
-          • URL and page title have been stable for `stability_s` seconds
-            (catches SPA soft-navigations that never flip readyState)
-
-        `settle_s` is a brief initial pause so the browser has time to
-        start a navigation that may not begin synchronously with the action.
+          1. document.readyState == 'complete'
+          2. URL and page title stable for `stability_s` seconds
+             (catches SPA soft-navigations)
+          3. All <img> elements are .complete (no src still downloading)
+          4. No in-flight fetch/XHR requests AND no new network resource
+             has finished for at least `network_quiet_ms` ms
         """
         log.info(f"[WAIT] Settling after {action_label} ({settle_s}s)…")
         time.sleep(settle_s)
+
+        # Inject the network tracker (no-op if already installed on this page)
+        try:
+            self.driver.execute_script(self._INJECT_NETWORK_TRACKER)
+        except Exception:
+            pass  # page may still be unloading; we'll retry in the loop
 
         deadline     = time.monotonic() + timeout_s
         stable_since = time.monotonic()
         last_url     = self.driver.current_url
         last_title   = self.driver.title
 
-        log.info(f"[WAIT] Polling for page ready (timeout={timeout_s}s)…")
+        log.info(f"[WAIT] Polling for full page ready (timeout={timeout_s}s)…")
         while time.monotonic() < deadline:
-            ready_state = self.driver.execute_script("return document.readyState;")
-            cur_url     = self.driver.current_url
-            cur_title   = self.driver.title
+            try:
+                ready_state = self.driver.execute_script("return document.readyState;")
+                cur_url     = self.driver.current_url
+                cur_title   = self.driver.title
 
-            if cur_url != last_url or cur_title != last_title:
-                last_url     = cur_url
-                last_title   = cur_title
-                stable_since = time.monotonic()
-                log.info(f"[WAIT] Change detected → {cur_url!r}  readyState={ready_state}")
+                # Re-inject tracker after a navigation flushes the page
+                if cur_url != last_url or cur_title != last_title:
+                    last_url     = cur_url
+                    last_title   = cur_title
+                    stable_since = time.monotonic()
+                    log.info(f"[WAIT] Change → {cur_url!r}  readyState={ready_state}")
+                    try:
+                        self.driver.execute_script(self._INJECT_NETWORK_TRACKER)
+                    except Exception:
+                        pass
 
-            if (ready_state == "complete"
-                    and time.monotonic() - stable_since >= stability_s):
-                log.info(f"[WAIT] Page ready after {action_label}")
+                if ready_state != "complete":
+                    time.sleep(poll_s)
+                    continue
+
+                if time.monotonic() - stable_since < stability_s:
+                    time.sleep(poll_s)
+                    continue
+
+                net = self.driver.execute_script(self._QUERY_NETWORK)
+                pending_imgs = net.get("pendingImgs", 0)
+                in_flight    = net.get("inFlight", 0)
+                ms_quiet     = net.get("msSinceLast", 9999)
+
+                if pending_imgs > 0 or in_flight > 0 or ms_quiet < network_quiet_ms:
+                    log.info(
+                        f"[WAIT] Still loading — imgs={pending_imgs} "
+                        f"xhr/fetch={in_flight} quietMs={ms_quiet:.0f}"
+                    )
+                    time.sleep(poll_s)
+                    continue
+
+                log.info(f"[WAIT] Page fully ready after {action_label}")
                 return
 
-            time.sleep(poll_s)
+            except Exception as exc:
+                # Driver may briefly throw during a navigation; just keep polling
+                log.debug(f"[WAIT] Poll exception (transient): {exc}")
+                time.sleep(poll_s)
 
         log.warning(f"[WAIT] Timed out after {timeout_s}s waiting for {action_label}")
 
