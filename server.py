@@ -5,52 +5,40 @@ import hashlib
 import json
 import logging
 from functools import wraps
-
 from flask import Flask, request, send_from_directory, Response
-
 from selenium import webdriver
 from selenium.webdriver.firefox.service import Service
 from selenium.webdriver.firefox.options import Options
-
+from selenium.webdriver.common.action_chains import ActionChains
 
 # =========================
 # LOGGING
 # =========================
-
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s"
 )
-
 log = logging.getLogger("BrowserAPI")
-
 
 # =========================
 # CONFIG
 # =========================
-
 GECKODRIVER_PATH = "geckodriver.exe"
-
 ALLOWED_IPS = {
     "127.0.0.1",
     "localhost",
     "YOUR_PUBLIC_IP_HERE"
 }
-
 PUBLIC_BASE_URL = None
-
 SEARCH_ENGINE_URL = "https://duckduckgo.com/?q={}"
-
 
 # =========================
 # SECURITY
 # =========================
-
 def is_allowed_api_ip():
     ip = request.remote_addr
     log.info(f"[SECURITY] Request from IP: {ip}")
     return ip in ALLOWED_IPS
-
 
 def require_api_ip(func):
     @wraps(func)
@@ -61,58 +49,42 @@ def require_api_ip(func):
         return func(*args, **kwargs)
     return wrapper
 
-
 def format_file_url(filename: str):
     url = f"{PUBLIC_BASE_URL}/files/{filename}" if PUBLIC_BASE_URL else f"/files/{filename}"
     log.info(f"[FILES] Returning: {url}")
     return url
 
-
 # =========================
 # URL RESOLUTION
 # =========================
-
 def resolve_input_to_url(text: str) -> str:
     text = text.strip()
     log.info(f"[RESOLVE] Input: {text}")
-
     if not text:
         raise ValueError("Empty input")
-
     if text.startswith("http://") or text.startswith("https://"):
         return text
-
     if "." in text and " " not in text:
         url = "https://" + text
         log.info(f"[RESOLVE] Domain → {url}")
         return url
-
     url = SEARCH_ENGINE_URL.format(urllib.parse.quote_plus(text))
     log.info(f"[RESOLVE] Search → {url}")
     return url
 
-
 # =========================
 # BROWSER
 # =========================
-
 class BrowserManager:
     def __init__(self, geckodriver_path=GECKODRIVER_PATH, headless=True):
         log.info("[BROWSER] Starting Firefox")
-
         options = Options()
         options.headless = headless
-
         service = Service(geckodriver_path)
         self.driver = webdriver.Firefox(service=service, options=options)
-
         self.output_dir = os.path.abspath("screenshots")
         os.makedirs(self.output_dir, exist_ok=True)
-
-        # cache:
-        # key -> filename
         self.cache = {}
-
         log.info("[BROWSER] Ready")
 
     # -------------------------
@@ -121,6 +93,41 @@ class BrowserManager:
     def navigate(self, url: str):
         log.info(f"[NAV] {url}")
         self.driver.get(url)
+
+    # -------------------------
+    # CLICK at centred coords
+    # -------------------------
+    def click_at(self, img_x: float, img_y: float):
+        """
+        img_x, img_y are in the centred coordinate system:
+            x=0,y=0  → centre of viewport
+            x=-vw/2  → left edge,   x=+vw/2 → right edge
+            y=+vh/2  → top edge,    y=-vh/2  → bottom edge
+
+        Selenium's move_to_element_with_offset expects pixel offsets
+        from the centre of the element (body), so we convert directly.
+        Selenium y-axis: positive = down, so we negate img_y.
+        """
+        vw = self.driver.execute_script("return window.innerWidth;")
+        vh = self.driver.execute_script("return window.innerHeight;")
+        log.info(f"[CLICK] Viewport: {vw}×{vh}  img_coords: ({img_x}, {img_y})")
+
+        # Clamp to viewport bounds (client already clips, but be safe)
+        img_x = max(-vw / 2, min(vw / 2, img_x))
+        img_y = max(-vh / 2, min(vh / 2, img_y))
+
+        # Convert to Selenium pixel coords (origin = top-left of viewport)
+        px = int(vw / 2 + img_x)
+        py = int(vh / 2 - img_y)          # flip y
+        log.info(f"[CLICK] Pixel coords: ({px}, {py})")
+
+        # Use JavaScript click so we stay at the exact viewport pixel
+        # regardless of scroll position or element offsets.
+        self.driver.execute_script(
+            "document.elementFromPoint(arguments[0], arguments[1])?.click();",
+            px, py
+        )
+        log.info("[CLICK] Done")
 
     # -------------------------
     # SCROLL POSITION
@@ -157,24 +164,16 @@ class BrowserManager:
     def screenshot_viewport(self, url: str):
         scroll = self.get_scroll()
         sig_hash = self.hash_obj(self.get_page_signature())
-
         key = (url, "viewport", scroll[0], scroll[1], sig_hash)
-
         log.info(f"[CACHE] Key: {key}")
-
         if key in self.cache:
             log.info("[CACHE] HIT → viewport")
             return self.cache[key]
-
         log.info("[CACHE] MISS → taking viewport screenshot")
-
         filename = f"{uuid.uuid4().hex}.png"
         path = os.path.join(self.output_dir, filename)
-
         self.driver.save_screenshot(path)
-
         self.cache[key] = filename
-
         log.info(f"[SCREENSHOT] Saved viewport: {filename}")
         return filename
 
@@ -183,26 +182,24 @@ class BrowserManager:
     # -------------------------
     def screenshot_full(self, url: str):
         sig_hash = self.hash_obj(self.get_page_signature())
-
         key = (url, "full", sig_hash)
-
         log.info(f"[CACHE] Key: {key}")
-
         if key in self.cache:
             log.info("[CACHE] HIT → full page")
             return self.cache[key]
-
         log.info("[CACHE] MISS → full page screenshot")
-
         filename = f"{uuid.uuid4().hex}.png"
         path = os.path.join(self.output_dir, filename)
-
         self.driver.save_full_page_screenshot(path)
-
         self.cache[key] = filename
-
         log.info(f"[SCREENSHOT] Saved full: {filename}")
         return filename
+
+    # -------------------------
+    # CURRENT URL
+    # -------------------------
+    def current_url(self):
+        return self.driver.current_url
 
     # -------------------------
     # NAV
@@ -223,7 +220,6 @@ class BrowserManager:
 # =========================
 # APP
 # =========================
-
 app = Flask(__name__)
 browser = BrowserManager(headless=False)
 
@@ -231,15 +227,12 @@ browser = BrowserManager(headless=False)
 # =========================
 # NAVIGATE
 # =========================
-
 @app.route("/navigate", methods=["POST"])
 @require_api_ip
 def navigate():
     raw = request.data.decode("utf-8").strip()
-
     if not raw:
         return Response("EMPTY", status=400)
-
     try:
         url = resolve_input_to_url(raw)
         browser.navigate(url)
@@ -250,25 +243,49 @@ def navigate():
 
 
 # =========================
+# CLICK
+# =========================
+@app.route("/click", methods=["POST"])
+@require_api_ip
+def click():
+    """
+    Body (plain text): "x y"  e.g. "-120.5 340.0"
+    Coordinates are in the centred system matching what the client displays.
+    """
+    raw = request.data.decode("utf-8").strip()
+    log.info(f"[CLICK] Raw body: {raw!r}")
+    try:
+        parts = raw.split()
+        if len(parts) != 2:
+            return Response("Expected 'x y'", status=400)
+        img_x = float(parts[0])
+        img_y = float(parts[1])
+        browser.click_at(img_x, img_y)
+        return Response("OK", mimetype="text/plain")
+    except ValueError as e:
+        return Response(f"Bad coords: {e}", status=400)
+    except Exception as e:
+        log.exception("Click error")
+        return Response(str(e), status=500)
+
+
+# =========================
 # SCREENSHOT (CACHE-AWARE)
 # =========================
-
 @app.route("/screenshot", methods=["POST"])
 @require_api_ip
 def screenshot():
     full = request.args.get("full", "false").lower() in ("true", "1", "yes", "on")
-
     try:
-        url = browser.driver.current_url
+        url = browser.current_url()
         log.info(f"[SCREENSHOT] URL={url} full={full}")
-
         if full:
             filename = browser.screenshot_full(url)
         else:
             filename = browser.screenshot_viewport(url)
-
-        return Response(format_file_url(filename), mimetype="text/plain")
-
+        # Return "url\ncurrent_page_url" so client can update the address bar
+        file_url = format_file_url(filename)
+        return Response(f"{file_url}\n{url}", mimetype="text/plain")
     except Exception as e:
         log.exception("Screenshot error")
         return Response(str(e), status=500)
@@ -277,14 +294,12 @@ def screenshot():
 # =========================
 # SCROLL
 # =========================
-
 @app.route("/scroll/down", methods=["GET"])
 @require_api_ip
 def scroll_down():
     log.info("[SCROLL] down")
     browser.driver.execute_script("window.scrollBy(0, window.innerHeight);")
     return Response("OK")
-
 
 @app.route("/scroll/up", methods=["GET"])
 @require_api_ip
@@ -297,20 +312,17 @@ def scroll_up():
 # =========================
 # NAV
 # =========================
-
 @app.route("/back", methods=["GET"])
 @require_api_ip
 def back():
     browser.back()
     return Response("OK")
 
-
 @app.route("/forward", methods=["GET"])
 @require_api_ip
 def forward():
     browser.forward()
     return Response("OK")
-
 
 @app.route("/shutdown", methods=["GET"])
 @require_api_ip
@@ -322,7 +334,6 @@ def shutdown():
 # =========================
 # FILES
 # =========================
-
 @app.route("/files/<path:filename>")
 def files(filename):
     return send_from_directory(browser.output_dir, filename)
@@ -331,7 +342,6 @@ def files(filename):
 # =========================
 # RUN
 # =========================
-
 if __name__ == "__main__":
     log.info("[SERVER] starting")
     app.run(host="0.0.0.0", port=5049)
