@@ -4,7 +4,9 @@ import uuid
 import urllib.parse
 import hashlib
 import json
+from io import BytesIO
 import logging
+from PIL import Image
 from functools import wraps
 
 from flask import Flask, request, send_from_directory, Response
@@ -36,6 +38,9 @@ ALLOWED_IPS = {
 PUBLIC_BASE_URL = None
 
 SEARCH_ENGINE_URL = "https://duckduckgo.com/?q={}"
+
+BROWSER_WIDTH = 720
+BROWSER_HEIGHT = 1280
 
 # =========================
 # SECURITY
@@ -110,12 +115,19 @@ class BrowserManager:
 
         options = uc.ChromeOptions()
 
+        # This prevents Windows DPI scaling from breaking coordinates.
+        options.add_argument("--force-device-scale-factor=1")
+
         if headless:
             options.add_argument("--headless=new")
 
-        options.add_argument("--start-maximized")
-
         self.driver = uc.Chrome(options=options)
+
+        self.driver.set_window_size(
+            BROWSER_WIDTH,
+            BROWSER_HEIGHT
+        )
+
 
         self.output_dir = os.path.abspath("screenshots")
 
@@ -526,20 +538,38 @@ class BrowserManager:
     # SCREENSHOT
     # -------------------------
 
-    def screenshot_viewport(self, url):
+    def screenshot_viewport(self, url, fmt="jpg"):
 
         self.wait_for_page_ready("screenshot")
 
-        filename = f"{uuid.uuid4().hex}.png"
+        filename = f"{uuid.uuid4().hex}.{fmt.lower()}"
+        path = os.path.join(self.output_dir, filename)
 
-        path = os.path.join(
-            self.output_dir,
-            filename
-        )
+        # Always capture PNG bytes from Chrome
+        png_bytes = self.driver.get_screenshot_as_png()
 
-        self.driver.save_screenshot(path)
+        # PNG mode = original behavior (fast path, no conversion)
+        if fmt.lower() == "png":
+            with open(path, "wb") as f:
+                f.write(png_bytes)
+            return filename
 
-        return filename
+        # JPG mode = convert in memory
+        elif fmt.lower() in ("jpg", "jpeg"):
+
+            image = Image.open(BytesIO(png_bytes)).convert("RGB")
+
+            image.save(
+                path,
+                "JPEG",
+                quality=85,
+                optimize=True
+            )
+
+            return filename
+
+        else:
+            raise ValueError("Invalid format. Use 'png' or 'jpg'")
 
     def current_url(self):
 
