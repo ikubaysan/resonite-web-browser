@@ -294,8 +294,36 @@ class BrowserManager:
 
         # Perform the click + explicit focus
         self.driver.execute_script("""
-            const el = document.elementFromPoint(arguments[0], arguments[1]);
-            if (el) { el.click(); el.focus(); }
+            const x = arguments[0];
+            const y = arguments[1];
+
+            let el = document.elementFromPoint(x, y);
+            if (!el) return;
+
+            try {
+                // If click() exists, use it
+                if (typeof el.click === "function") {
+                    el.click();
+                } else {
+                    // Otherwise simulate a real mouse click
+                    const evt = new MouseEvent("click", {
+                        bubbles: true,
+                        cancelable: true,
+                        view: window,
+                        clientX: x,
+                        clientY: y
+                    });
+                    el.dispatchEvent(evt);
+                }
+
+                // Focus if possible
+                if (typeof el.focus === "function") {
+                    el.focus();
+                }
+
+            } catch (e) {
+                console.warn("Click fallback triggered:", e);
+            }
         """, px, py)
 
         self.wait_for_page_ready("click")
