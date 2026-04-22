@@ -248,10 +248,92 @@ class BrowserClient:
             self.root.after(0, self._show_error, str(exc))
 
     def _send_click_and_refresh(self, img_x: float, img_y: float):
-        """POST click coords then take a new screenshot."""
+        """POST click coords; if server signals TEXT_INPUT, open typing modal."""
         try:
             body = f"{img_x:.2f} {img_y:.2f}".encode()
-            _http("POST", f"{self.server}/click", body)
+            response = _http("POST", f"{self.server}/click", body)
+            lines = response.strip().splitlines()
+            status = lines[0].strip() if lines else "OK"
+
+            if status == "TEXT_INPUT":
+                # Don't take a screenshot — show the typing modal instead
+                self.root.after(0, self._hide_loading)
+                self.root.after(0, self._open_text_modal, img_x, img_y)
+            else:
+                self._do_screenshot()
+        except Exception as exc:
+            self.root.after(0, self._show_error, str(exc))
+
+    def _open_text_modal(self, img_x: float, img_y: float):
+        """Pop up a small modal for the user to type into the focused field."""
+        modal = tk.Toplevel(self.root)
+        modal.title("Type text")
+        modal.configure(bg="#181825")
+        modal.resizable(False, False)
+        modal.transient(self.root)
+        modal.grab_set()
+
+        # Centre over main window
+        self.root.update_idletasks()
+        rx = self.root.winfo_rootx() + self.root.winfo_width()  // 2 - 200
+        ry = self.root.winfo_rooty() + self.root.winfo_height() // 2 - 70
+        modal.geometry(f"400x140+{rx}+{ry}")
+
+        tk.Label(
+            modal, text="Enter text for the selected field:",
+            bg="#181825", fg="#a6adc8", font=("Courier", 10)
+        ).pack(pady=(14, 4), padx=16, anchor="w")
+
+        entry_var = tk.StringVar()
+        entry = tk.Entry(
+            modal, textvariable=entry_var,
+            bg="#313244", fg="#cdd6f4", insertbackground="#cdd6f4",
+            font=("Courier", 12), relief=tk.FLAT,
+            highlightthickness=1, highlightbackground="#45475a",
+            highlightcolor="#7c3aed"
+        )
+        entry.pack(fill=tk.X, padx=16, ipady=5)
+        entry.focus_set()
+
+        btn_row = tk.Frame(modal, bg="#181825")
+        btn_row.pack(pady=12)
+
+        def submit():
+            text = entry_var.get()
+            modal.destroy()
+            if text:
+                self._show_loading("Typing…")
+                self._thread(self._do_type, img_x, img_y, text)
+
+        def cancel():
+            modal.destroy()
+            # Still take a screenshot so the display stays current
+            self._thread(self._do_screenshot)
+
+        tk.Button(
+            btn_row, text="Send",
+            command=submit,
+            bg="#7c3aed", fg="white", activebackground="#6d28d9",
+            font=("Courier", 10, "bold"), relief=tk.FLAT,
+            padx=14, pady=4, cursor="hand2"
+        ).pack(side=tk.LEFT, padx=(0, 8))
+
+        tk.Button(
+            btn_row, text="Cancel",
+            command=cancel,
+            bg="#313244", fg="#cdd6f4", activebackground="#45475a",
+            font=("Courier", 10), relief=tk.FLAT,
+            padx=14, pady=4, cursor="hand2"
+        ).pack(side=tk.LEFT)
+
+        entry.bind("<Return>", lambda _: submit())
+        entry.bind("<Escape>", lambda _: cancel())
+
+    def _do_type(self, img_x: float, img_y: float, text: str):
+        """POST /type then take a fresh screenshot."""
+        try:
+            body = f"{img_x:.2f} {img_y:.2f}\n{text}".encode("utf-8")
+            _http("POST", f"{self.server}/type", body)
             self._do_screenshot()
         except Exception as exc:
             self.root.after(0, self._show_error, str(exc))

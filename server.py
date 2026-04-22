@@ -230,24 +230,122 @@ class BrowserManager:
 
     # -------------------------
     # CLICK at centred coords
+    # Returns True if a text input is now focused
     # -------------------------
-    def click_at(self, img_x: float, img_y: float):
+
+    # Tags / types that accept keyboard text input
+    _IS_TEXT_INPUT_JS = """
+    return (function(el) {
+        if (!el) return false;
+        const tag = el.tagName.toLowerCase();
+        if (tag === 'textarea') return true;
+        if (el.isContentEditable) return true;
+        if (tag === 'input') {
+            const t = (el.type || 'text').toLowerCase();
+            const textTypes = ['text','search','email','url','tel','password',
+                               'number','date','datetime-local','month','week','time'];
+            return textTypes.includes(t);
+        }
+        return false;
+    })(arguments[0]);
+    """
+
+    def _coords_to_viewport_px(self, img_x: float, img_y: float):
         vw = self.driver.execute_script("return window.innerWidth;")
         vh = self.driver.execute_script("return window.innerHeight;")
-        log.info(f"[CLICK] Viewport: {vw}×{vh}  img_coords: ({img_x}, {img_y})")
-
         img_x = max(-vw / 2, min(vw / 2, img_x))
         img_y = max(-vh / 2, min(vh / 2, img_y))
-
         px = int(vw / 2 + img_x)
-        py = int(vh / 2 - img_y)          # flip y
-        log.info(f"[CLICK] Pixel coords: ({px}, {py})")
+        py = int(vh / 2 - img_y)
+        return px, py
 
+    def click_at(self, img_x: float, img_y: float) -> bool:
+        """Click and return True if the clicked element (or active element) is a text input."""
+        px, py = self._coords_to_viewport_px(img_x, img_y)
+        log.info(f"[CLICK] img=({img_x},{img_y}) → px=({px},{py})")
+
+        # Check what's at these coords BEFORE clicking — some sites move focus
+        # away from the input on click (e.g. clicking a wrapper div).
+        el_at_point = self.driver.execute_script(
+            "return document.elementFromPoint(arguments[0], arguments[1]);",
+            px, py
+        )
+        is_input_at_point = bool(self.driver.execute_script(
+            self._IS_TEXT_INPUT_JS, el_at_point
+        )) if el_at_point else False
+
+        # Also try walking up the ancestor chain — input may be wrapped in a label/div
+        is_input_ancestor = bool(self.driver.execute_script("""
+            let el = document.elementFromPoint(arguments[0], arguments[1]);
+            while (el && el !== document.body) {
+                const tag = el.tagName.toLowerCase();
+                if (tag === 'textarea') return true;
+                if (el.isContentEditable) return true;
+                if (tag === 'input') {
+                    const t = (el.type || 'text').toLowerCase();
+                    const ok = ['text','search','email','url','tel','password',
+                                'number','date','datetime-local','month','week','time'];
+                    if (ok.includes(t)) return true;
+                }
+                el = el.parentElement;
+            }
+            return false;
+        """, px, py))
+
+        # Perform the click + explicit focus
+        self.driver.execute_script("""
+            const el = document.elementFromPoint(arguments[0], arguments[1]);
+            if (el) { el.click(); el.focus(); }
+        """, px, py)
+
+        self.wait_for_page_ready("click")
+
+        # Check activeElement after click
+        active = self.driver.execute_script("return document.activeElement;")
+        is_active_input = bool(self.driver.execute_script(
+            self._IS_TEXT_INPUT_JS, active
+        )) if active else False
+
+        is_input = is_input_at_point or is_input_ancestor or is_active_input
+        log.info(
+            f"[CLICK] text_input check — at_point={is_input_at_point} "
+            f"ancestor={is_input_ancestor} active={is_active_input} → {is_input}"
+        )
+        return is_input
+
+    # -------------------------
+    # TYPE into element at coords
+    # -------------------------
+    def type_at(self, img_x: float, img_y: float, text: str):
+        """Focus the element at (img_x, img_y), clear it, type text."""
+        from selenium.webdriver.common.keys import Keys
+
+        px, py = self._coords_to_viewport_px(img_x, img_y)
+        log.info(f"[TYPE] img=({img_x},{img_y}) → px=({px},{py})  text={text!r}")
+
+        # Click to focus
         self.driver.execute_script(
             "document.elementFromPoint(arguments[0], arguments[1])?.click();",
             px, py
         )
-        self.wait_for_page_ready("click")
+
+        active = self.driver.execute_script("return document.activeElement;")
+        is_input = bool(self.driver.execute_script(self._IS_TEXT_INPUT_JS, active))
+        if not is_input:
+            raise ValueError("No text input found at those coordinates")
+
+        # Clear existing content then send keys
+        active.send_keys(Keys.CONTROL, "a")
+        active.send_keys(Keys.DELETE)
+        active.send_keys(text)
+        log.info("[TYPE] Text entered")
+
+        # Invalidate cache for current URL so next screenshot is fresh
+        cur_url = self.driver.current_url
+        stale = [k for k in self.cache if k[0] == cur_url]
+        for k in stale:
+            del self.cache[k]
+        log.info(f"[CACHE] Invalidated {len(stale)} entries for {cur_url!r}")
 
     # -------------------------
     # SCROLL
@@ -380,8 +478,10 @@ def navigate():
 @require_api_ip
 def click():
     """
-    Body (plain text): "x y"  e.g. "-120.5 340.0"
-    Coordinates are in the centred system matching what the client displays.
+    Body: "x y"
+    Response (plain text, two lines):
+      Line 1: "TEXT_INPUT" if a text field was focused, else "OK"
+      Line 2: echoed "x y" (so the client knows where to follow up with /type)
     """
     raw = request.data.decode("utf-8").strip()
     log.info(f"[CLICK] Raw body: {raw!r}")
@@ -391,12 +491,46 @@ def click():
             return Response("Expected 'x y'", status=400)
         img_x = float(parts[0])
         img_y = float(parts[1])
-        browser.click_at(img_x, img_y)
-        return Response("OK", mimetype="text/plain")
+        is_input = browser.click_at(img_x, img_y)
+        status = "TEXT_INPUT" if is_input else "OK"
+        return Response(f"{status}\n{img_x} {img_y}", mimetype="text/plain")
     except ValueError as e:
         return Response(f"Bad coords: {e}", status=400)
     except Exception as e:
         log.exception("Click error")
+        return Response(str(e), status=500)
+
+
+# =========================
+# TYPE
+# =========================
+@app.route("/type", methods=["POST"])
+@require_api_ip
+def type_text():
+    """
+    Body (plain text):
+      Line 1: "x y"
+      Line 2 onward: text to type (may contain newlines)
+    Clears the field first, types the text, invalidates cache.
+    Response: "OK" or error.
+    """
+    raw = request.data.decode("utf-8")
+    log.info(f"[TYPE] Raw body: {raw!r}")
+    try:
+        first_newline = raw.index("\n")
+        coords_part = raw[:first_newline].strip()
+        text        = raw[first_newline + 1:]          # preserve inner newlines
+        parts = coords_part.split()
+        if len(parts) != 2:
+            return Response("Expected 'x y\\ntext'", status=400)
+        img_x = float(parts[0])
+        img_y = float(parts[1])
+        browser.type_at(img_x, img_y, text)
+        return Response("OK", mimetype="text/plain")
+    except ValueError as e:
+        return Response(f"Bad request: {e}", status=400)
+    except Exception as e:
+        log.exception("Type error")
         return Response(str(e), status=500)
 
 
