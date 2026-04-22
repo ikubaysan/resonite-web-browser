@@ -28,7 +28,7 @@ SEARCH_ENGINE_URL = "https://duckduckgo.com/?q={}"
 
 
 # =========================
-# SECURITY (API ONLY)
+# SECURITY
 # =========================
 
 def is_allowed_api_ip():
@@ -39,16 +39,12 @@ def require_api_ip(func):
     @wraps(func)
     def wrapper(*args, **kwargs):
         if not is_allowed_api_ip():
-            return Response(
-                "FORBIDDEN: API access denied",
-                status=403,
-                mimetype="text/plain"
-            )
+            return Response("FORBIDDEN: API access denied", status=403, mimetype="text/plain")
         return func(*args, **kwargs)
     return wrapper
 
 
-def format_file_url(filename: str) -> str:
+def format_file_url(filename: str):
     if PUBLIC_BASE_URL:
         return f"{PUBLIC_BASE_URL}/files/{filename}"
     return f"/files/{filename}"
@@ -58,23 +54,19 @@ def format_file_url(filename: str) -> str:
 # URL / SEARCH RESOLUTION
 # =========================
 
-def resolve_input_to_url(user_input: str) -> str:
-    text = user_input.strip()
+def resolve_input_to_url(text: str) -> str:
+    text = text.strip()
 
     if not text:
         raise ValueError("Empty input")
 
-    # URL
     if text.startswith("http://") or text.startswith("https://"):
         return text
 
-    # bare domain
     if "." in text and " " not in text:
         return "https://" + text
 
-    # search query
-    query = urllib.parse.quote_plus(text)
-    return SEARCH_ENGINE_URL.format(query)
+    return SEARCH_ENGINE_URL.format(urllib.parse.quote_plus(text))
 
 
 # =========================
@@ -92,21 +84,20 @@ class BrowserManager:
         self.output_dir = os.path.abspath("screenshots")
         os.makedirs(self.output_dir, exist_ok=True)
 
-    def open_url(self, url: str):
+    # NAVIGATION ONLY
+    def navigate(self, url: str):
         self.driver.get(url)
 
-    # viewport screenshot (visible area only)
-    def screenshot_viewport(self) -> str:
+    def screenshot_viewport(self):
         filename = f"{uuid.uuid4().hex}.png"
-        filepath = os.path.join(self.output_dir, filename)
-        self.driver.save_screenshot(filepath)
+        path = os.path.join(self.output_dir, filename)
+        self.driver.save_screenshot(path)
         return filename
 
-    # full page screenshot
-    def screenshot_full_page(self) -> str:
+    def screenshot_full(self):
         filename = f"{uuid.uuid4().hex}.png"
-        filepath = os.path.join(self.output_dir, filename)
-        self.driver.save_full_page_screenshot(filepath)
+        path = os.path.join(self.output_dir, filename)
+        self.driver.save_full_page_screenshot(path)
         return filename
 
     def back(self):
@@ -128,39 +119,55 @@ browser = BrowserManager(headless=False)
 
 
 # =========================
-# SCREENSHOT API
+# NAVIGATION ENDPOINT (NEW)
+# =========================
+
+@app.route("/navigate", methods=["POST"])
+@require_api_ip
+def navigate():
+    """
+    RAW BODY:
+        URL OR search query
+
+    Example:
+        https://github.com
+        selenium firefox docs
+    """
+    raw = request.data.decode("utf-8").strip()
+
+    if not raw:
+        return Response("ERROR: empty input", status=400, mimetype="text/plain")
+
+    try:
+        url = resolve_input_to_url(raw)
+        browser.navigate(url)
+        return Response("OK", mimetype="text/plain")
+
+    except Exception as e:
+        return Response(f"ERROR: {str(e)}", status=500, mimetype="text/plain")
+
+
+# =========================
+# SCREENSHOT ONLY ENDPOINT
 # =========================
 
 @app.route("/screenshot", methods=["POST"])
 @require_api_ip
 def screenshot():
     """
-    RAW BODY:
-        URL or search query
+    Takes screenshot of CURRENT browser state.
 
     QUERY PARAM:
-        ?full=true  -> full page screenshot
-        default     -> viewport only
+        ?full=true  -> full page
+        default     -> viewport
     """
 
-    raw_input = request.data.decode("utf-8").strip()
-
-    if not raw_input:
-        return Response("ERROR: empty input", status=400, mimetype="text/plain")
+    full_param = request.args.get("full", "false").lower()
+    full = full_param in ("true", "1", "yes", "on")
 
     try:
-        url = resolve_input_to_url(raw_input)
-
-        # -----------------------------
-        # NEW: full vs viewport mode
-        # -----------------------------
-        full_param = request.args.get("full", "false").lower()
-        full_screenshot = full_param in ("true", "1", "yes", "on")
-
-        browser.open_url(url)
-
-        if full_screenshot:
-            filename = browser.screenshot_full_page()
+        if full:
+            filename = browser.screenshot_full()
         else:
             filename = browser.screenshot_viewport()
 
@@ -171,35 +178,25 @@ def screenshot():
 
 
 # =========================
-# SCROLL CONTROL (API ONLY)
+# SCROLL (UNCHANGED)
 # =========================
 
 @app.route("/scroll/down", methods=["GET"])
 @require_api_ip
 def scroll_down():
-    try:
-        browser.driver.execute_script(
-            "window.scrollBy(0, window.innerHeight);"
-        )
-        return Response("OK", mimetype="text/plain")
-    except Exception as e:
-        return Response(f"ERROR: {str(e)}", status=500, mimetype="text/plain")
+    browser.driver.execute_script("window.scrollBy(0, window.innerHeight);")
+    return Response("OK", mimetype="text/plain")
 
 
 @app.route("/scroll/up", methods=["GET"])
 @require_api_ip
 def scroll_up():
-    try:
-        browser.driver.execute_script(
-            "window.scrollBy(0, -window.innerHeight);"
-        )
-        return Response("OK", mimetype="text/plain")
-    except Exception as e:
-        return Response(f"ERROR: {str(e)}", status=500, mimetype="text/plain")
+    browser.driver.execute_script("window.scrollBy(0, -window.innerHeight);")
+    return Response("OK", mimetype="text/plain")
 
 
 # =========================
-# NAVIGATION (API ONLY)
+# NAVIGATION CONTROLS
 # =========================
 
 @app.route("/back", methods=["GET"])
@@ -224,10 +221,10 @@ def shutdown():
 
 
 # =========================
-# PUBLIC FILE SERVER
+# FILE SERVER (PUBLIC)
 # =========================
 
-@app.route("/files/<path:filename>", methods=["GET"])
+@app.route("/files/<path:filename>")
 def files(filename):
     return send_from_directory(browser.output_dir, filename)
 
