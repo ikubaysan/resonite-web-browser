@@ -1,3 +1,5 @@
 selenium
 flask
 pillow
+undetected-chromedriver
+setuptools
