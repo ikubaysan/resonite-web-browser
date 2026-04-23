@@ -2,4 +2,6 @@ selenium
 flask
 pillow
 undetected-chromedriver
+chromedriver-autoinstaller
 setuptools
+webdriver-manager

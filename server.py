@@ -6,6 +6,12 @@ import hashlib
 import json
 from io import BytesIO
 import logging
+import platform
+
+from webdriver_manager.core.os_manager import OperationSystemManager, ChromeType
+
+
+import chromedriver_autoinstaller
 from PIL import Image
 from functools import wraps
 
@@ -39,8 +45,14 @@ PUBLIC_BASE_URL = None
 
 SEARCH_ENGINE_URL = "https://duckduckgo.com/?q={}"
 
-BROWSER_WIDTH = 720
-BROWSER_HEIGHT = 1280
+# BROWSER_WIDTH = 720
+# BROWSER_HEIGHT = 1280
+
+# BROWSER_WIDTH = 1280
+# BROWSER_HEIGHT = 720
+
+BROWSER_WIDTH = 1080
+BROWSER_HEIGHT = 1920
 
 # =========================
 # SECURITY
@@ -113,15 +125,37 @@ class BrowserManager:
 
         log.info("[BROWSER] Starting Undetected Chrome")
 
+        self.install_chromedriver()
+
         options = uc.ChromeOptions()
 
         # This prevents Windows DPI scaling from breaking coordinates.
         options.add_argument("--force-device-scale-factor=1")
 
+        options.add_argument('--force-dark-mode')
+
         if headless:
             options.add_argument("--headless=new")
 
-        self.driver = uc.Chrome(options=options)
+        # Look for Chromium on Linux and Mac, and Google Chrome on Windows
+        try:
+            br_ver = OperationSystemManager().get_browser_version_from_os(
+                ChromeType.CHROMIUM if platform.system() != 'Windows' else ChromeType.GOOGLE
+            )
+        except Exception:
+            br_ver = OperationSystemManager().get_browser_version_from_os(ChromeType.GOOGLE)
+
+        version_main = int(br_ver.split('.')[0])
+        log.info(f"Got browser version: {br_ver}")
+
+        self.driver = uc.Chrome(options=options, version_main=version_main)
+
+        # self.driver.execute_cdp_cmd("Emulation.setDeviceMetricsOverride", {
+        #     "width": BROWSER_WIDTH,
+        #     "height": BROWSER_HEIGHT,
+        #     "deviceScaleFactor": 1,
+        #     "mobile": True,
+        # })
 
         self.driver.set_window_size(
             BROWSER_WIDTH,
@@ -215,6 +249,23 @@ class BrowserManager:
 
     })();
     """
+
+    def install_chromedriver(self):
+        """
+        Ensure the correct chromedriver version is installed.
+
+        Safe to call multiple times.
+        Will download only if missing.
+        """
+
+        while True:
+            try:
+                path = chromedriver_autoinstaller.install()
+                log.info(f"[CHROMEDRIVER] Ready at: {path}")
+                break
+            except Exception as e:
+                log.error(f"[CHROMEDRIVER] Install failed: {e}")
+                time.sleep(30)
 
     # -------------------------
     # WAIT
