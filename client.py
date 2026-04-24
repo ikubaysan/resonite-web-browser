@@ -197,7 +197,7 @@ class BrowserClient:
 
     def _do_back(self):
         try:
-            _http("GET", f"{self.server}/back")
+            _http("POST", f"{self.server}/back")
             self._do_screenshot()
         except Exception as exc:
             self.root.after(0, self._show_error, str(exc))
@@ -208,7 +208,7 @@ class BrowserClient:
 
     def _do_forward(self):
         try:
-            _http("GET", f"{self.server}/forward")
+            _http("POST", f"{self.server}/forward")
             self._do_screenshot()
         except Exception as exc:
             self.root.after(0, self._show_error, str(exc))
@@ -221,31 +221,61 @@ class BrowserClient:
 
     def _do_scroll(self, direction: str):
         try:
-            _http("GET", f"{self.server}/scroll/{direction}")
+            _http("POST", f"{self.server}/scroll/{direction}")
             self._do_screenshot()
         except Exception as exc:
             self.root.after(0, self._show_error, str(exc))
 
+
     def _do_screenshot(self):
-        """Request screenshot; response is 'file_url\ncurrent_page_url'."""
+        """
+        Request screenshot.
+
+        Response format (4096 chars total):
+
+        [0:2048]   file URL (space padded)
+        [2048:4096] page URL (space padded)
+        """
+
+        FIXED_FIELD_SIZE = 2048
+        TOTAL_RESPONSE_SIZE = FIXED_FIELD_SIZE * 2
+
         try:
             body = _http("POST", f"{self.server}/screenshot")
-            lines = body.strip().splitlines()
-            file_url   = lines[0].strip()
-            page_url   = lines[1].strip() if len(lines) > 1 else ""
+
+            # Ensure expected length
+            if len(body) < TOTAL_RESPONSE_SIZE:
+                raise ValueError(
+                    f"Invalid response length: {len(body)}"
+                )
+
+            # Extract fixed-width fields
+            file_url = body[0:FIXED_FIELD_SIZE].rstrip()
+            page_url = body[FIXED_FIELD_SIZE:TOTAL_RESPONSE_SIZE].rstrip()
 
             # Resolve relative URLs
             if file_url.startswith("/"):
                 file_url = self.server + file_url
 
-            # Fetch the image bytes
+            # Fetch image
             with urllib.request.urlopen(file_url, timeout=30) as resp:
                 img_bytes = resp.read()
 
             img = Image.open(io.BytesIO(img_bytes)).convert("RGBA")
-            self.root.after(0, self._set_image, img, page_url)
+
+            self.root.after(
+                0,
+                self._set_image,
+                img,
+                page_url
+            )
+
         except Exception as exc:
-            self.root.after(0, self._show_error, str(exc))
+            self.root.after(
+                0,
+                self._show_error,
+                str(exc)
+            )
 
     def _send_click_and_refresh(self, img_x: float, img_y: float):
         """POST click coords; if server signals TEXT_INPUT, open typing modal."""

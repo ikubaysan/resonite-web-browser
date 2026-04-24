@@ -41,7 +41,8 @@ ALLOWED_IPS = {
     "YOUR_PUBLIC_IP_HERE"
 }
 
-PUBLIC_BASE_URL = None
+#PUBLIC_BASE_URL = None
+PUBLIC_BASE_URL = "http://127.0.0.1:5049"
 
 SEARCH_ENGINE_URL = "https://duckduckgo.com/?q={}"
 
@@ -589,7 +590,7 @@ class BrowserManager:
     # SCREENSHOT
     # -------------------------
 
-    def screenshot_viewport(self, url, fmt="jpg"):
+    def screenshot_viewport(self, url, fmt="png"):
 
         self.wait_for_page_ready("screenshot")
 
@@ -708,9 +709,20 @@ def type_text():
 # SCREENSHOT
 # =========================
 
+def _pad_field(text: str, size: int) -> str:
+    """
+    Pad text with spaces to exactly `size` characters.
+    Truncates if too long.
+    """
+    text = text[:size]
+    return text.ljust(size, " ")
+
+
 @app.route("/screenshot", methods=["POST"])
 @require_api_ip
 def screenshot():
+    FIXED_FIELD_SIZE = 2048
+    TOTAL_RESPONSE_SIZE = FIXED_FIELD_SIZE * 2
 
     url = browser.current_url()
 
@@ -718,8 +730,18 @@ def screenshot():
 
     file_url = format_file_url(filename)
 
+    # Build fixed-length response
+    padded_file_url = _pad_field(file_url, FIXED_FIELD_SIZE)
+    padded_page_url = _pad_field(url, FIXED_FIELD_SIZE)
+
+    response_text = padded_file_url + padded_page_url
+
+    # Safety check (optional but recommended)
+    assert len(response_text) == TOTAL_RESPONSE_SIZE
+
     return Response(
-        f"{file_url}\n{url}"
+        response_text,
+        mimetype="text/plain"
     )
 
 
@@ -727,7 +749,7 @@ def screenshot():
 # SCROLL
 # =========================
 
-@app.route("/scroll/down")
+@app.route("/scroll/down", methods=["POST"])
 @require_api_ip
 def scroll_down():
 
@@ -736,7 +758,7 @@ def scroll_down():
     return Response("OK")
 
 
-@app.route("/scroll/up")
+@app.route("/scroll/up", methods=["POST"])
 @require_api_ip
 def scroll_up():
 
@@ -749,7 +771,7 @@ def scroll_up():
 # NAVIGATION
 # =========================
 
-@app.route("/back")
+@app.route("/back", methods=["POST"])
 @require_api_ip
 def back():
 
@@ -758,7 +780,7 @@ def back():
     return Response("OK")
 
 
-@app.route("/forward")
+@app.route("/forward", methods=["POST"])
 @require_api_ip
 def forward():
 
@@ -767,7 +789,7 @@ def forward():
     return Response("OK")
 
 
-@app.route("/shutdown")
+@app.route("/shutdown", methods=["POST"])
 @require_api_ip
 def shutdown():
 
