@@ -11,6 +11,8 @@ from webdriver_manager.core.os_manager import OperationSystemManager, ChromeType
 
 from modules.BrowserScripts import QUERY_NETWORK, INJECT_NETWORK_TRACKER, CLICK_AT, IS_INPUT
 
+from selenium.common.exceptions import TimeoutException, WebDriverException
+
 import chromedriver_autoinstaller
 from PIL import Image
 from functools import wraps
@@ -22,6 +24,8 @@ from selenium.webdriver.common.keys import Keys
 
 from modules.Helpers import parse_coordinates
 from modules.ServerConfig import ServerConfig
+
+from collections import OrderedDict
 
 # =========================
 # LOGGING
@@ -138,6 +142,12 @@ class BrowserManager:
 
     def __init__(self, headless=False):
 
+        self.use_memory_screenshots = CONFIG.use_memory_screenshots
+        self.max_memory_screenshots = CONFIG.max_memory_screenshots
+
+        self.screenshot_cache = OrderedDict()
+
+
         log.info("[BROWSER] Starting Undetected Chrome")
 
         self.install_chromedriver()
@@ -164,6 +174,7 @@ class BrowserManager:
         log.info(f"Got browser version: {br_ver}")
 
         self.driver = uc.Chrome(options=options, version_main=version_main)
+        self.driver.set_page_load_timeout(30)
 
         self.driver.execute_cdp_cmd("Emulation.setDeviceMetricsOverride", {
             "width": BROWSER_WIDTH,
@@ -458,36 +469,69 @@ class BrowserManager:
 
     def screenshot_viewport(self, url, fmt="png"):
 
-        self.wait_for_page_ready("screenshot")
+        # Always attempt wait, but NEVER let it block screenshots
+        try:
+            self.wait_for_page_ready("screenshot")
+        except Exception as e:
+            log.warning(f"[SCREENSHOT] wait_for_page_ready failed: {e}")
 
         filename = f"{uuid.uuid4().hex}.{fmt.lower()}"
+
+        try:
+            png_bytes = self.driver.get_screenshot_as_png()
+
+        except (TimeoutException, WebDriverException) as e:
+            log.warning(f"[SCREENSHOT] primary capture failed, retrying anyway: {e}")
+
+            # fallback: try again immediately (even if page is mid-load)
+            try:
+                png_bytes = self.driver.get_screenshot_as_png()
+            except Exception as e2:
+                log.error(f"[SCREENSHOT] fallback capture failed: {e2}")
+                return None  # or return a placeholder image filename
+
+        # =========================
+        # MEMORY MODE
+        # =========================
+        if self.use_memory_screenshots:
+
+            if fmt.lower() in ("jpg", "jpeg"):
+                image = Image.open(BytesIO(png_bytes)).convert("RGB")
+                buffer = BytesIO()
+                image.save(buffer, "JPEG", quality=85, optimize=True)
+                data = buffer.getvalue()
+            else:
+                data = png_bytes
+
+            self.screenshot_cache[filename] = data
+
+            while len(self.screenshot_cache) > self.max_memory_screenshots:
+                self.screenshot_cache.popitem(last=False)
+
+            return filename
+
+        # =========================
+        # FILE MODE
+        # =========================
         path = os.path.join(self.output_dir, filename)
 
-        # Always capture PNG bytes from Chrome
-        png_bytes = self.driver.get_screenshot_as_png()
+        try:
+            if fmt.lower() == "png":
+                with open(path, "wb") as f:
+                    f.write(png_bytes)
 
-        # PNG mode = original behavior (fast path, no conversion)
-        if fmt.lower() == "png":
-            with open(path, "wb") as f:
-                f.write(png_bytes)
-            return filename
+            elif fmt.lower() in ("jpg", "jpeg"):
+                image = Image.open(BytesIO(png_bytes)).convert("RGB")
+                image.save(path, "JPEG", quality=85, optimize=True)
 
-        # JPG mode = convert in memory
-        elif fmt.lower() in ("jpg", "jpeg"):
+            else:
+                raise ValueError("Invalid format")
 
-            image = Image.open(BytesIO(png_bytes)).convert("RGB")
+        except Exception as e:
+            log.error(f"[SCREENSHOT] save failed: {e}")
+            return None
 
-            image.save(
-                path,
-                "JPEG",
-                quality=85,
-                optimize=True
-            )
-
-            return filename
-
-        else:
-            raise ValueError("Invalid format. Use 'png' or 'jpg'")
+        return filename
 
     def current_url(self):
 
@@ -678,11 +722,29 @@ def shutdown():
 @app.route("/files/<path:filename>")
 def files(filename):
 
+    # =========================
+    # MEMORY MODE
+    # =========================
+    if browser.use_memory_screenshots:
+
+        data = browser.screenshot_cache.get(filename)
+
+        if data is None:
+            return Response("NOT FOUND", status=404)
+
+        # infer mime type
+        ext = filename.split(".")[-1].lower()
+        mimetype = "image/png" if ext == "png" else "image/jpeg"
+
+        return Response(data, mimetype=mimetype)
+
+    # =========================
+    # FILE MODE
+    # =========================
     return send_from_directory(
         browser.output_dir,
         filename
     )
-
 
 # =========================
 # RUN

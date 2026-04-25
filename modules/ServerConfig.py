@@ -1,6 +1,7 @@
 import configparser
 import ipaddress
 import logging
+import os.path
 from pathlib import Path
 
 log = logging.getLogger("BrowserAPI")
@@ -8,17 +9,17 @@ log = logging.getLogger("BrowserAPI")
 
 class ServerConfig:
 
-    CONFIG_FILE = Path("../config.ini")
+    CONFIG_FILE = os.path.abspath("./config.ini")
 
     def __init__(self):
 
         config = configparser.ConfigParser()
 
-        if self.CONFIG_FILE.exists():
+        if os.path.isfile(self.CONFIG_FILE):
             config.read(self.CONFIG_FILE)
         else:
-            log.warning(
-                "config.ini not found — using defaults"
+            raise FileNotFoundError(
+                f"Configuration file not found: {self.CONFIG_FILE}"
             )
 
         section = (
@@ -76,6 +77,18 @@ class ServerConfig:
             section.get(
                 "port",
                 5049
+            )
+        )
+
+        self.use_memory_screenshots = section.getboolean(
+            "use_memory_screenshots",
+            fallback=True
+        )
+
+        self.max_memory_screenshots = int(
+            section.get(
+                "max_memory_screenshots",
+                10
             )
         )
 
