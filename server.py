@@ -2,8 +2,6 @@ import os
 import time
 import uuid
 import urllib.parse
-import hashlib
-import json
 from io import BytesIO
 import logging
 import platform
@@ -11,6 +9,7 @@ import ipaddress
 
 from webdriver_manager.core.os_manager import OperationSystemManager, ChromeType
 
+from modules.BrowserScripts import QUERY_NETWORK, INJECT_NETWORK_TRACKER, CLICK_AT, IS_INPUT
 
 import chromedriver_autoinstaller
 from PIL import Image
@@ -21,7 +20,8 @@ from flask import Flask, request, send_from_directory, Response
 import undetected_chromedriver as uc
 from selenium.webdriver.common.keys import Keys
 
-from ServerConfig import ServerConfig
+from modules.Helpers import parse_coordinates
+from modules.ServerConfig import ServerConfig
 
 # =========================
 # LOGGING
@@ -198,85 +198,6 @@ class BrowserManager:
 
         log.info("[BROWSER] Ready")
 
-    # -------------------------
-    # NETWORK TRACKER
-    # -------------------------
-
-    _INJECT_NETWORK_TRACKER = """
-    if (!window.__netTracker) {
-        window.__netTracker = {
-            inFlight: 0,
-            lastFinished: performance.now()
-        };
-
-        const t = window.__netTracker;
-
-        const origFetch = window.fetch;
-
-        window.fetch = function(...args) {
-            t.inFlight++;
-
-            return origFetch.apply(this, args).finally(() => {
-                t.inFlight = Math.max(0, t.inFlight - 1);
-                t.lastFinished = performance.now();
-            });
-        };
-
-        const origOpen = XMLHttpRequest.prototype.open;
-
-        XMLHttpRequest.prototype.open = function(...args) {
-
-            this.addEventListener('loadend', () => {
-                t.inFlight = Math.max(0, t.inFlight - 1);
-                t.lastFinished = performance.now();
-            });
-
-            t.inFlight++;
-
-            return origOpen.apply(this, args);
-        };
-    }
-    """
-
-    _QUERY_NETWORK = """
-    return (function() {
-
-        const t = window.__netTracker;
-
-        const vw = window.innerWidth;
-        const vh = window.innerHeight;
-
-        const pendingImgs =
-            Array.from(document.images).filter(i => {
-
-                if (!i.src || i.complete)
-                    return false;
-
-                const r = i.getBoundingClientRect();
-
-                return (
-                    r.bottom > 0 &&
-                    r.right  > 0 &&
-                    r.top    < vh &&
-                    r.left   < vw
-                );
-            }).length;
-
-        const inFlight =
-            t ? t.inFlight : 0;
-
-        const msSinceLast =
-            t ? (performance.now() - t.lastFinished) : 9999;
-
-        return {
-            pendingImgs,
-            inFlight,
-            msSinceLast
-        };
-
-    })();
-    """
-
     def install_chromedriver(self):
         """
         Ensure the correct chromedriver version is installed.
@@ -318,7 +239,7 @@ class BrowserManager:
 
         # Ensure tracker exists
         try:
-            self.driver.execute_script(self._INJECT_NETWORK_TRACKER)
+            self.driver.execute_script(INJECT_NETWORK_TRACKER)
         except Exception:
             pass
 
@@ -349,7 +270,7 @@ class BrowserManager:
 
                     try:
                         self.driver.execute_script(
-                            self._INJECT_NETWORK_TRACKER
+                            INJECT_NETWORK_TRACKER
                         )
                     except Exception:
                         pass
@@ -370,7 +291,7 @@ class BrowserManager:
 
                 # Check network state
                 net = self.driver.execute_script(
-                    self._QUERY_NETWORK
+                    QUERY_NETWORK
                 )
 
                 if (
@@ -417,55 +338,7 @@ class BrowserManager:
         px = int(BROWSER_WIDTH / 2 + img_x)
         py = int(BROWSER_HEIGHT / 2 - img_y)
 
-        self.driver.execute_script("""
-            const x = arguments[0];
-            const y = arguments[1];
-
-            let el = document.elementFromPoint(x, y);
-            if (!el) return;
-
-            try {
-                // Walk up DOM to find a clickable element
-                let clickable = el;
-
-                while (clickable && clickable !== document.body) {
-                    if (typeof clickable.click === "function") break;
-                    clickable = clickable.parentElement;
-                }
-
-                if (clickable && typeof clickable.click === "function") {
-                    clickable.click();
-                } else {
-                    // Fallback: dispatch real mouse event
-                    const evt = new MouseEvent("click", {
-                        bubbles: true,
-                        cancelable: true,
-                        view: window,
-                        clientX: x,
-                        clientY: y
-                    });
-                    el.dispatchEvent(evt);
-                }
-
-                // Focus best candidate
-                if (clickable && typeof clickable.focus === "function") {
-                    clickable.focus();
-                }
-
-            } catch (e) {
-                console.warn("Click fallback triggered:", e);
-
-                // Absolute fallback
-                const evt = new MouseEvent("click", {
-                    bubbles: true,
-                    cancelable: true,
-                    view: window,
-                    clientX: x,
-                    clientY: y
-                });
-                el.dispatchEvent(evt);
-            }
-        """, px, py)
+        self.driver.execute_script(CLICK_AT, px, py)
 
         self.wait_for_page_ready("click")
 
@@ -474,23 +347,7 @@ class BrowserManager:
         )
 
         is_input = self.driver.execute_script(
-            """
-            let el = arguments[0];
-
-            if (!el)
-                return false;
-
-            let tag =
-                el.tagName.toLowerCase();
-
-            if (tag === "textarea")
-                return true;
-
-            if (tag === "input")
-                return true;
-
-            return el.isContentEditable;
-            """,
+            IS_INPUT,
             active
         )
 
@@ -676,68 +533,6 @@ def navigate():
 # CLICK
 # =========================
 
-def parse_coordinates(text: str):
-    """
-    Parse coordinate input into (x, y) floats.
-
-    Accepted formats:
-
-        134.3 -252.2
-        134.3, -252.2
-        [134.3, -252.2]
-        [134.3; -252.2]
-        (134.3, -252.2)
-        134.3;-252.2
-
-    Rules:
-
-    - Surrounding brackets [] or () are optional
-    - Separator can be:
-        space
-        comma (,)
-        semicolon (;)
-    - Values may be integers or floats
-    - Exactly two numbers are required
-
-    Returns:
-        (x, y) as floats
-
-    Raises:
-        ValueError if parsing fails
-    """
-
-    if not text:
-        raise ValueError("Empty coordinate input")
-
-    s = text.strip()
-
-    # Remove surrounding brackets if present
-    if (
-        (s.startswith("[") and s.endswith("]")) or
-        (s.startswith("(") and s.endswith(")"))
-    ):
-        s = s[1:-1].strip()
-
-    # Normalize separators to spaces
-    s = s.replace(",", " ")
-    s = s.replace(";", " ")
-
-    parts = s.split()
-
-    if len(parts) != 2:
-        raise ValueError(
-            f"Invalid coordinate format: '{text}'"
-        )
-
-    try:
-        x = float(parts[0])
-        y = float(parts[1])
-    except ValueError:
-        raise ValueError(
-            f"Invalid numeric values in: '{text}'"
-        )
-
-    return x, y
 
 @app.route("/click", methods=["POST"])
 @require_api_ip

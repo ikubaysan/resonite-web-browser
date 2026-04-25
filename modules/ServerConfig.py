@@ -8,7 +8,7 @@ log = logging.getLogger("BrowserAPI")
 
 class ServerConfig:
 
-    CONFIG_FILE = Path("config.ini")
+    CONFIG_FILE = Path("../config.ini")
 
     def __init__(self):
 
