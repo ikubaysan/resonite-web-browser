@@ -1,19 +1,12 @@
 import configparser
-from pathlib import Path
+import ipaddress
 import logging
+from pathlib import Path
 
 log = logging.getLogger("BrowserAPI")
 
-class ServerConfig:
-    """
-    Strongly-typed configuration loader.
 
-    Handles:
-    - Default values
-    - Type conversion
-    - Optional None values
-    - List parsing
-    """
+class ServerConfig:
 
     CONFIG_FILE = Path("config.ini")
 
@@ -24,18 +17,30 @@ class ServerConfig:
         if self.CONFIG_FILE.exists():
             config.read(self.CONFIG_FILE)
         else:
-            log.warning("config.ini not found — using defaults")
+            log.warning(
+                "config.ini not found — using defaults"
+            )
 
-        section = config["server"] if "server" in config else {}
+        section = (
+            config["server"]
+            if "server" in config
+            else {}
+        )
 
-        # ---- values ----
+        # -------------------------
+        # Allowed IP rules
+        # -------------------------
 
-        self.allowed_ips = self._parse_list(
+        self.allowed_ip_rules = self._parse_ip_rules(
             section.get(
                 "allowed_ips",
-                "127.0.0.1, localhost"
+                "localhost"
             )
         )
+
+        # -------------------------
+        # Optional string fields
+        # -------------------------
 
         self.public_base_url = self._parse_optional_str(
             section.get(
@@ -48,6 +53,10 @@ class ServerConfig:
             "search_engine_url",
             "https://duckduckgo.com/?q={}"
         )
+
+        # -------------------------
+        # Numeric fields
+        # -------------------------
 
         self.browser_width = int(
             section.get(
@@ -63,12 +72,6 @@ class ServerConfig:
             )
         )
 
-        self.headless = config.getboolean(
-            "server",
-            "headless",
-            fallback=False
-        )
-
         self.port = int(
             section.get(
                 "port",
@@ -76,34 +79,92 @@ class ServerConfig:
             )
         )
 
-        # Always allow localhost (safety)
-        self.allowed_ips |= {
-            "127.0.0.1",
-            "localhost"
-        }
+        # -------------------------
+        # Boolean fields
+        # -------------------------
 
-    # -------------------------
-    # Helpers
-    # -------------------------
+        if "server" in config:
+            self.headless = config.getboolean(
+                "server",
+                "headless",
+                fallback=False
+            )
+        else:
+            self.headless = False
+
+        # -------------------------
+        # Validate values
+        # -------------------------
+
+        self._validate()
+
+    # ==========================================================
+    # IP Rules
+    # ==========================================================
 
     @staticmethod
-    def _parse_list(value: str):
-        """Convert comma-separated list to set."""
-        if not value:
-            return set()
+    def _parse_ip_rules(value: str):
 
-        return {
-            item.strip()
-            for item in value.split(",")
-            if item.strip()
-        }
+        if not value:
+            return []
+
+        parts = [
+            p.strip()
+            for p in value.replace(",", "\n").splitlines()
+            if p.strip()
+        ]
+
+        rules = []
+
+        for part in parts:
+
+            # Translate localhost
+            if part.lower() == "localhost":
+                part = "127.0.0.1"
+
+            try:
+
+                network = ipaddress.ip_network(
+                    part,
+                    strict=False
+                )
+
+                rules.append(network)
+
+            except ValueError:
+
+                log.error(
+                    f"Invalid IP rule: {part}"
+                )
+
+        # Ensure localhost always allowed
+        localhost_net = ipaddress.ip_network(
+            "127.0.0.1"
+        )
+
+        if not any(
+            localhost_net == r
+            for r in rules
+        ):
+            rules.append(localhost_net)
+
+        # Warn if allowing everything
+        for net in rules:
+
+            if net.prefixlen == 0:
+
+                log.warning(
+                    "WARNING: 0.0.0.0/0 allows ALL IPs"
+                )
+
+        return rules
+
+    # ==========================================================
+    # Optional string
+    # ==========================================================
 
     @staticmethod
     def _parse_optional_str(value: str):
-        """
-        Convert string to None if:
-            none / null / empty
-        """
 
         if value is None:
             return None
@@ -114,3 +175,27 @@ class ServerConfig:
             return None
 
         return value.strip()
+
+    # ==========================================================
+    # Validation
+    # ==========================================================
+
+    def _validate(self):
+
+        if not (1 <= self.port <= 65535):
+
+            raise ValueError(
+                f"Invalid port: {self.port}"
+            )
+
+        if self.browser_width <= 0:
+
+            raise ValueError(
+                "browser_width must be > 0"
+            )
+
+        if self.browser_height <= 0:
+
+            raise ValueError(
+                "browser_height must be > 0"
+            )

@@ -7,6 +7,7 @@ import json
 from io import BytesIO
 import logging
 import platform
+import ipaddress
 
 from webdriver_manager.core.os_manager import OperationSystemManager, ChromeType
 
@@ -39,8 +40,6 @@ log = logging.getLogger("BrowserAPI")
 
 CONFIG = ServerConfig()
 
-ALLOWED_IPS = CONFIG.allowed_ips
-
 PUBLIC_BASE_URL = CONFIG.public_base_url
 
 SEARCH_ENGINE_URL = CONFIG.search_engine_url
@@ -57,9 +56,27 @@ PORT = CONFIG.port
 # =========================
 
 def is_allowed_api_ip():
-    ip = request.remote_addr
-    log.info(f"[SECURITY] Request from IP: {ip}")
-    return ip in ALLOWED_IPS
+
+    ip_str = request.remote_addr
+
+    log.info(f"[SECURITY] Request from IP: {ip_str}")
+
+    try:
+        ip = ipaddress.ip_address(ip_str)
+
+    except ValueError:
+        log.warning("[SECURITY] Invalid IP format")
+        return False
+
+    # Check against rules
+    for network in CONFIG.allowed_ip_rules:
+
+        if ip in network:
+            return True
+
+    log.warning("[SECURITY] BLOCKED request")
+
+    return False
 
 
 def require_api_ip(func):
@@ -632,7 +649,7 @@ class BrowserManager:
 
 app = Flask(__name__)
 
-browser = BrowserManager(headless=False)
+browser = BrowserManager(headless=HEADLESS)
 
 
 # =========================
