@@ -20,6 +20,8 @@ from flask import Flask, request, send_from_directory, Response
 import undetected_chromedriver as uc
 from selenium.webdriver.common.keys import Keys
 
+from ServerConfig import ServerConfig
+
 # =========================
 # LOGGING
 # =========================
@@ -35,25 +37,20 @@ log = logging.getLogger("BrowserAPI")
 # CONFIG
 # =========================
 
-ALLOWED_IPS = {
-    "127.0.0.1",
-    "localhost",
-    "YOUR_PUBLIC_IP_HERE"
-}
+CONFIG = ServerConfig()
 
-#PUBLIC_BASE_URL = None
-PUBLIC_BASE_URL = "http://127.0.0.1:5049"
+ALLOWED_IPS = CONFIG.allowed_ips
 
-SEARCH_ENGINE_URL = "https://duckduckgo.com/?q={}"
+PUBLIC_BASE_URL = CONFIG.public_base_url
 
-# BROWSER_WIDTH = 720
-# BROWSER_HEIGHT = 1280
+SEARCH_ENGINE_URL = CONFIG.search_engine_url
 
-# BROWSER_WIDTH = 1280
-# BROWSER_HEIGHT = 720
+BROWSER_WIDTH = CONFIG.browser_width
+BROWSER_HEIGHT = CONFIG.browser_height
 
-BROWSER_WIDTH = 1080
-BROWSER_HEIGHT = 1920
+HEADLESS = CONFIG.headless
+
+PORT = CONFIG.port
 
 # =========================
 # SECURITY
@@ -151,12 +148,12 @@ class BrowserManager:
 
         self.driver = uc.Chrome(options=options, version_main=version_main)
 
-        # self.driver.execute_cdp_cmd("Emulation.setDeviceMetricsOverride", {
-        #     "width": BROWSER_WIDTH,
-        #     "height": BROWSER_HEIGHT,
-        #     "deviceScaleFactor": 1,
-        #     "mobile": True,
-        # })
+        self.driver.execute_cdp_cmd("Emulation.setDeviceMetricsOverride", {
+            "width": BROWSER_WIDTH,
+            "height": BROWSER_HEIGHT,
+            "deviceScaleFactor": 1,
+            "mobile": True,
+        })
 
         self.driver.set_window_size(
             BROWSER_WIDTH,
@@ -169,6 +166,18 @@ class BrowserManager:
         os.makedirs(self.output_dir, exist_ok=True)
 
         self.cache = {}
+
+        size = self.driver.execute_script("""
+        return {
+            innerWidth: window.innerWidth,
+            innerHeight: window.innerHeight,
+            outerWidth: window.outerWidth,
+            outerHeight: window.outerHeight,
+            devicePixelRatio: window.devicePixelRatio
+        };
+        """)
+
+        print("VIEWPORT:", size)
 
         log.info("[BROWSER] Ready")
 
@@ -386,17 +395,10 @@ class BrowserManager:
 
     def click_at(self, img_x, img_y):
 
-        vw = self.driver.execute_script(
-            "return window.innerWidth;"
-        )
-
-        vh = self.driver.execute_script(
-            "return window.innerHeight;"
-        )
-
-        px = int(vw / 2 + img_x)
-
-        py = int(vh / 2 - img_y)
+        # Use the configured browser dimensions (matches screenshot size)
+        # NOT innerWidth/innerHeight which can differ due to mobile emulation
+        px = int(BROWSER_WIDTH / 2 + img_x)
+        py = int(BROWSER_HEIGHT / 2 - img_y)
 
         self.driver.execute_script("""
             const x = arguments[0];
@@ -482,18 +484,8 @@ class BrowserManager:
     # -------------------------
 
     def type_at(self, img_x, img_y, text):
-
-        vw = self.driver.execute_script(
-            "return window.innerWidth;"
-        )
-
-        vh = self.driver.execute_script(
-            "return window.innerHeight;"
-        )
-
-        px = int(vw / 2 + img_x)
-
-        py = int(vh / 2 - img_y)
+        px = int(BROWSER_WIDTH / 2 + img_x)
+        py = int(BROWSER_HEIGHT / 2 - img_y)
 
         self.driver.execute_script(
             """
@@ -667,13 +659,76 @@ def navigate():
 # CLICK
 # =========================
 
+def parse_coordinates(text: str):
+    """
+    Parse coordinate input into (x, y) floats.
+
+    Accepted formats:
+
+        134.3 -252.2
+        134.3, -252.2
+        [134.3, -252.2]
+        [134.3; -252.2]
+        (134.3, -252.2)
+        134.3;-252.2
+
+    Rules:
+
+    - Surrounding brackets [] or () are optional
+    - Separator can be:
+        space
+        comma (,)
+        semicolon (;)
+    - Values may be integers or floats
+    - Exactly two numbers are required
+
+    Returns:
+        (x, y) as floats
+
+    Raises:
+        ValueError if parsing fails
+    """
+
+    if not text:
+        raise ValueError("Empty coordinate input")
+
+    s = text.strip()
+
+    # Remove surrounding brackets if present
+    if (
+        (s.startswith("[") and s.endswith("]")) or
+        (s.startswith("(") and s.endswith(")"))
+    ):
+        s = s[1:-1].strip()
+
+    # Normalize separators to spaces
+    s = s.replace(",", " ")
+    s = s.replace(";", " ")
+
+    parts = s.split()
+
+    if len(parts) != 2:
+        raise ValueError(
+            f"Invalid coordinate format: '{text}'"
+        )
+
+    try:
+        x = float(parts[0])
+        y = float(parts[1])
+    except ValueError:
+        raise ValueError(
+            f"Invalid numeric values in: '{text}'"
+        )
+
+    return x, y
+
 @app.route("/click", methods=["POST"])
 @require_api_ip
 def click():
 
     raw = request.data.decode().strip()
 
-    x, y = map(float, raw.split())
+    x, y = parse_coordinates(raw)
 
     is_input = browser.click_at(x, y)
 
@@ -689,6 +744,12 @@ def click():
 @app.route("/type", methods=["POST"])
 @require_api_ip
 def type_text():
+    """
+    Expects raw body with format:
+    <coordinates><newline><text>
+    Where:
+    :return:
+    """
 
     raw = request.data.decode()
 
@@ -698,7 +759,7 @@ def type_text():
 
     text = raw[first_newline + 1:]
 
-    x, y = map(float, coords.split())
+    x, y = parse_coordinates(coords)
 
     browser.type_at(x, y, text)
 
@@ -821,5 +882,5 @@ if __name__ == "__main__":
 
     app.run(
         host="0.0.0.0",
-        port=5049
+        port=PORT,
     )
