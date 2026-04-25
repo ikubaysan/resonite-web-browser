@@ -22,7 +22,7 @@ from flask import Flask, request, send_from_directory, Response
 import undetected_chromedriver as uc
 from selenium.webdriver.common.keys import Keys
 
-from modules.Helpers import parse_coordinates
+from modules.Helpers import parse_coordinates, log_screenshot_size
 from modules.ServerConfig import ServerConfig
 
 from collections import OrderedDict
@@ -467,9 +467,8 @@ class BrowserManager:
     # SCREENSHOT
     # -------------------------
 
-    def screenshot_viewport(self, url, fmt="png"):
+    def screenshot_viewport(self, url, fmt="jpg"):
 
-        # Always attempt wait, but NEVER let it block screenshots
         try:
             self.wait_for_page_ready("screenshot")
         except Exception as e:
@@ -479,16 +478,16 @@ class BrowserManager:
 
         try:
             png_bytes = self.driver.get_screenshot_as_png()
-
         except (TimeoutException, WebDriverException) as e:
             log.warning(f"[SCREENSHOT] primary capture failed, retrying anyway: {e}")
-
-            # fallback: try again immediately (even if page is mid-load)
             try:
                 png_bytes = self.driver.get_screenshot_as_png()
             except Exception as e2:
                 log.error(f"[SCREENSHOT] fallback capture failed: {e2}")
-                return None  # or return a placeholder image filename
+                return None
+
+        # ✅ ALWAYS log raw screenshot size (before any conversion)
+        log_screenshot_size(png_bytes, filename, "Raw PNG")
 
         # =========================
         # MEMORY MODE
@@ -502,6 +501,9 @@ class BrowserManager:
                 data = buffer.getvalue()
             else:
                 data = png_bytes
+
+            # ✅ log final stored memory size
+            log_screenshot_size(data, filename, "memory")
 
             self.screenshot_cache[filename] = data
 
@@ -523,9 +525,11 @@ class BrowserManager:
             elif fmt.lower() in ("jpg", "jpeg"):
                 image = Image.open(BytesIO(png_bytes)).convert("RGB")
                 image.save(path, "JPEG", quality=85, optimize=True)
-
             else:
                 raise ValueError("Invalid format")
+
+            # ✅ log file mode final size
+            log_screenshot_size(png_bytes, filename, "file")
 
         except Exception as e:
             log.error(f"[SCREENSHOT] save failed: {e}")

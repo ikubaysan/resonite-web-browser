@@ -1,4 +1,6 @@
+import logging
 
+log = logging.getLogger("BrowserAPI")
 
 def parse_coordinates(text: str):
     """
@@ -62,3 +64,10 @@ def parse_coordinates(text: str):
         )
 
     return x, y
+
+
+
+def log_screenshot_size(data: bytes, filename: str, label: str = ""):
+    size_kb = len(data) / 1024
+    tag = f" [{label}]" if label else ""
+    log.info(f"[SCREENSHOT]{tag} {filename} size: {size_kb:.2f} KB")
