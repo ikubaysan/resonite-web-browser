@@ -209,6 +209,43 @@ class BrowserManager:
 
         log.info("[BROWSER] Ready")
 
+    # -------------------------
+    # STOP CURRENT LOAD
+    # -------------------------
+
+    def stop_loading(self):
+        """
+        Attempt to stop the current page load.
+
+        Safe to call even if no navigation is active.
+        Uses window.stop() and ESC as fallback.
+        """
+
+        try:
+            log.info("[NAV] Stopping current page load")
+
+            # Primary method
+            self.driver.execute_script(
+                "window.stop();"
+            )
+
+        except Exception as e:
+            log.warning(
+                f"[NAV] window.stop() failed: {e}"
+            )
+
+        # ESC fallback (optional but helpful)
+        try:
+            body = self.driver.find_element(
+                "tag name",
+                "body"
+            )
+
+            body.send_keys(Keys.ESCAPE)
+
+        except Exception:
+            pass
+
     def install_chromedriver(self):
         """
         Ensure the correct chromedriver version is installed.
@@ -334,10 +371,13 @@ class BrowserManager:
 
         log.info(f"[NAV] {url}")
 
+        # Stop current load first
+        self.stop_loading()
+
+        # Start navigation
         self.driver.get(url)
 
         self.wait_for_page_ready("navigate")
-
     # -------------------------
     # CLICK
     # -------------------------
@@ -453,11 +493,15 @@ class BrowserManager:
 
     def back(self):
 
+        self.stop_loading()
+
         self.driver.back()
 
         self.wait_for_page_ready("back")
 
     def forward(self):
+
+        self.stop_loading()
 
         self.driver.forward()
 
