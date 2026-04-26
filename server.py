@@ -384,6 +384,8 @@ class BrowserManager:
 
     def click_at(self, img_x, img_y):
 
+        self.stop_loading()
+
         # Use the configured browser dimensions (matches screenshot size)
         # NOT innerWidth/innerHeight which can differ due to mobile emulation
         px = int(BROWSER_WIDTH / 2 + img_x)
