@@ -26,6 +26,7 @@ from modules.Helpers import parse_coordinates, log_screenshot_size
 from modules.ServerConfig import ServerConfig
 
 from collections import OrderedDict
+import time
 
 # =========================
 # LOGGING
@@ -539,30 +540,71 @@ class BrowserManager:
 
     def screenshot_viewport(self, url, fmt="jpg"):
 
+        total_start = time.perf_counter()
+
+        # =========================
+        # wait_for_page_ready
+        # =========================
+        t0 = time.perf_counter()
+
         try:
             self.wait_for_page_ready("screenshot")
         except Exception as e:
             log.warning(f"[SCREENSHOT] wait_for_page_ready failed: {e}")
 
+        log.info(
+            f"[TIMING] wait_for_page_ready: "
+            f"{time.perf_counter() - t0:.3f}s"
+        )
+
         filename = f"{uuid.uuid4().hex}.{fmt.lower()}"
+
+        # =========================
+        # screenshot capture
+        # =========================
+        t0 = time.perf_counter()
 
         try:
             png_bytes = self.driver.get_screenshot_as_png()
         except (TimeoutException, WebDriverException) as e:
             log.warning(f"[SCREENSHOT] primary capture failed, retrying anyway: {e}")
+
+            retry_start = time.perf_counter()
+
             try:
                 png_bytes = self.driver.get_screenshot_as_png()
             except Exception as e2:
                 log.error(f"[SCREENSHOT] fallback capture failed: {e2}")
                 return None
 
-        # ✅ ALWAYS log raw screenshot size (before any conversion)
+            log.info(
+                f"[TIMING] screenshot retry: "
+                f"{time.perf_counter() - retry_start:.3f}s"
+            )
+
+        log.info(
+            f"[TIMING] screenshot capture: "
+            f"{time.perf_counter() - t0:.3f}s"
+        )
+
+        # =========================
+        # raw size logging
+        # =========================
+        t0 = time.perf_counter()
+
         log_screenshot_size(png_bytes, filename, "Raw PNG")
+
+        log.info(
+            f"[TIMING] raw size logging: "
+            f"{time.perf_counter() - t0:.3f}s"
+        )
 
         # =========================
         # MEMORY MODE
         # =========================
         if self.use_memory_screenshots:
+
+            t0 = time.perf_counter()
 
             if fmt.lower() in ("jpg", "jpeg"):
                 image = Image.open(BytesIO(png_bytes)).convert("RGB")
@@ -572,7 +614,13 @@ class BrowserManager:
             else:
                 data = png_bytes
 
-            # ✅ log final stored memory size
+            log.info(
+                f"[TIMING] memory conversion: "
+                f"{time.perf_counter() - t0:.3f}s"
+            )
+
+            t0 = time.perf_counter()
+
             log_screenshot_size(data, filename, "memory")
 
             self.screenshot_cache[filename] = data
@@ -580,12 +628,24 @@ class BrowserManager:
             while len(self.screenshot_cache) > self.max_memory_screenshots:
                 self.screenshot_cache.popitem(last=False)
 
+            log.info(
+                f"[TIMING] memory storage: "
+                f"{time.perf_counter() - t0:.3f}s"
+            )
+
+            log.info(
+                f"[TIMING] TOTAL screenshot_viewport: "
+                f"{time.perf_counter() - total_start:.3f}s"
+            )
+
             return filename
 
         # =========================
         # FILE MODE
         # =========================
         path = os.path.join(self.output_dir, filename)
+
+        t0 = time.perf_counter()
 
         try:
             if fmt.lower() == "png":
@@ -598,12 +658,21 @@ class BrowserManager:
             else:
                 raise ValueError("Invalid format")
 
-            # ✅ log file mode final size
             log_screenshot_size(png_bytes, filename, "file")
 
         except Exception as e:
             log.error(f"[SCREENSHOT] save failed: {e}")
             return None
+
+        log.info(
+            f"[TIMING] file save: "
+            f"{time.perf_counter() - t0:.3f}s"
+        )
+
+        log.info(
+            f"[TIMING] TOTAL screenshot_viewport: "
+            f"{time.perf_counter() - total_start:.3f}s"
+        )
 
         return filename
 
