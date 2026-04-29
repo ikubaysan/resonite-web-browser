@@ -282,19 +282,33 @@ class BrowserClient:
         try:
             body = f"{img_x:.2f} {img_y:.2f}".encode()
             response = _http("POST", f"{self.server}/click", body)
-            lines = response.strip().splitlines()
+            lines = response.splitlines()
+
             status = lines[0].strip() if lines else "OK"
 
             if status == "TEXT_INPUT":
-                # Don't take a screenshot — show the typing modal instead
+
+                existing_text = ""
+
+                if len(lines) >= 2:
+                    existing_text = lines[1]
+
                 self.root.after(0, self._hide_loading)
-                self.root.after(0, self._open_text_modal, img_x, img_y)
+
+                self.root.after(
+                    0,
+                    self._open_text_modal,
+                    img_x,
+                    img_y,
+                    existing_text
+                )
+
             else:
                 self._do_screenshot()
         except Exception as exc:
             self.root.after(0, self._show_error, str(exc))
 
-    def _open_text_modal(self, img_x: float, img_y: float):
+    def _open_text_modal(self, img_x: float, img_y: float, existing_text: str=""):
         """Pop up a small modal for the user to type into the focused field."""
         modal = tk.Toplevel(self.root)
         modal.title("Type text")
@@ -314,7 +328,10 @@ class BrowserClient:
             bg="#181825", fg="#a6adc8", font=("Courier", 10)
         ).pack(pady=(14, 4), padx=16, anchor="w")
 
-        entry_var = tk.StringVar()
+        entry_var = tk.StringVar(
+            value=existing_text
+        )
+
         entry = tk.Entry(
             modal, textvariable=entry_var,
             bg="#313244", fg="#cdd6f4", insertbackground="#cdd6f4",
@@ -324,6 +341,8 @@ class BrowserClient:
         )
         entry.pack(fill=tk.X, padx=16, ipady=5)
         entry.focus_set()
+        # Select all text for easy replacement, but keep cursor at end
+        entry.selection_range(0, tk.END)
 
         btn_row = tk.Frame(modal, bg="#181825")
         btn_row.pack(pady=12)

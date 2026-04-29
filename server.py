@@ -404,7 +404,32 @@ class BrowserManager:
             active
         )
 
-        return bool(is_input)
+        text_value = ""
+
+        if is_input:
+            try:
+                text_value = self.driver.execute_script(
+                    """
+                    let el = arguments[0];
+
+                    if (!el) return "";
+
+                    if (el.tagName === "INPUT" || el.tagName === "TEXTAREA") {
+                        return el.value || "";
+                    }
+
+                    if (el.isContentEditable) {
+                        return el.innerText || "";
+                    }
+
+                    return "";
+                    """,
+                    active
+                )
+            except Exception as e:
+                log.warning(f"[CLICK] Failed to read input value: {e}")
+
+        return bool(is_input), text_value
 
     # -------------------------
     # TYPE
@@ -437,10 +462,9 @@ class BrowserManager:
 
         element = active
 
+        # Select all existing text and delete it before typing new text
         element.send_keys(Keys.CONTROL, "a")
-
         element.send_keys(Keys.DELETE)
-
         element.send_keys(text)
 
         self.cache.clear()
@@ -636,11 +660,18 @@ def click():
 
     x, y = parse_coordinates(raw)
 
-    is_input = browser.click_at(x, y)
+    is_input, text_value = browser.click_at(x, y)
 
-    status = "TEXT_INPUT" if is_input else "OK"
+    if is_input:
+        log.info(f"[CLICK] Input value: '{text_value}'")
+        status = "TEXT_INPUT" if is_input else "OK"
+        return Response(f"{status}\n{text_value}")
 
-    return Response(f"{status}\n{x} {y}")
+    else:
+        return Response("OK")
+
+    # return Response(f"{status}\n{x} {y}")
+    #return Response(f"{status}\n{text_value}")
 
 
 # =========================
