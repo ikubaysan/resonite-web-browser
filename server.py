@@ -538,7 +538,7 @@ class BrowserManager:
     # SCREENSHOT
     # -------------------------
 
-    def screenshot_viewport(self, url, fmt="jpg"):
+    def screenshot_viewport(self, url, fmt="png"):
 
         total_start = time.perf_counter()
 
